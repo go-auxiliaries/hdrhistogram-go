@@ -171,6 +171,22 @@ func (h *Histogram) getNormalizingIndexOffset() int32 {
 	return 1
 }
 
+// AtomicMerge merges the data stored in the given histogram with the receiver,
+// returning the number of recorded values which had to be dropped.
+func (h *Histogram) AtomicMerge(from *Histogram) (dropped int64) {
+	i := from.rIterator()
+	for i.next() {
+		v := i.valueFromIdx
+		c := i.countAtIdx
+
+		if h.AtomicRecordValues(v, c) != nil {
+			dropped += c
+		}
+	}
+
+	return
+}
+
 // Merge merges the data stored in the given histogram with the receiver,
 // returning the number of recorded values which had to be dropped.
 func (h *Histogram) Merge(from *Histogram) (dropped int64) {
