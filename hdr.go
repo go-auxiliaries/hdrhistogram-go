@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/bits"
 	"sort"
+	"sync/atomic"
 )
 
 // A Bracket is a part of a cumulative distribution.
@@ -170,6 +171,22 @@ func (h *Histogram) getNormalizingIndexOffset() int32 {
 	return 1
 }
 
+// AtomicMerge merges the data stored in the given histogram with the receiver,
+// returning the number of recorded values which had to be dropped.
+func (h *Histogram) AtomicMerge(from *Histogram) (dropped int64) {
+	i := from.rIterator()
+	for i.next() {
+		v := i.valueFromIdx
+		c := i.countAtIdx
+
+		if h.AtomicRecordValues(v, c) != nil {
+			dropped += c
+		}
+	}
+
+	return
+}
+
 // Merge merges the data stored in the given histogram with the receiver,
 // returning the number of recorded values which had to be dropped.
 func (h *Histogram) Merge(from *Histogram) (dropped int64) {
@@ -306,6 +323,54 @@ func (h *Histogram) RecordValues(v, n int64) error {
 func (h *Histogram) setCountAtIndex(idx int, n int64) {
 	h.counts[idx] += n
 	h.totalCount += n
+}
+
+// AtomicRecordValue records the given value, returning an error if the value is out
+// of range.
+func (h *Histogram) AtomicRecordValue(v int64) error {
+	return h.AtomicRecordValues(v, 1)
+}
+
+// AtomicRecordCorrectedValue records the given value, correcting for stalls in the
+// recording process. This only works for processes which are recording values
+// at an expected interval (e.g., doing jitter analysis). Processes which are
+// recording ad-hoc values (e.g., latency for incoming requests) can't take
+// advantage of this.
+func (h *Histogram) AtomicRecordCorrectedValue(v, expectedInterval int64) error {
+	if err := h.AtomicRecordValue(v); err != nil {
+		return err
+	}
+
+	if expectedInterval <= 0 || v <= expectedInterval {
+		return nil
+	}
+
+	missingValue := v - expectedInterval
+	for missingValue >= expectedInterval {
+		if err := h.AtomicRecordValue(missingValue); err != nil {
+			return err
+		}
+		missingValue -= expectedInterval
+	}
+
+	return nil
+}
+
+// AtomicRecordValues records n occurrences of the given value, returning an error if
+// the value is out of range.
+func (h *Histogram) AtomicRecordValues(v, n int64) error {
+	idx := h.countsIndexFor(v)
+	if idx < 0 || int(h.countsLen) <= idx {
+		return fmt.Errorf("value %d is too large to be recorded", v)
+	}
+	h.setAtomicCountAtIndex(idx, n)
+
+	return nil
+}
+
+func (h *Histogram) setAtomicCountAtIndex(idx int, n int64) {
+	atomic.AddInt64(&h.counts[idx], n)
+	atomic.AddInt64(&h.totalCount, n)
 }
 
 // ValueAtQuantile returns the largest value that (100% - percentile) of the overall recorded value entries
